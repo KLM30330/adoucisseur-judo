@@ -198,3 +198,9 @@ Avec suffisamment de sel, le bit 7 doit rester à 1 pendant toute la régénéra
 Une requête au plus toutes les 300 ms, uniquement lorsque le bus est libre depuis 30 ms ;
 attente de réponse 400 ms. Toute réponse `0x0043` arrivée hors délai est ignorée
 (sinon la page ne correspond plus et un bloc B pourrait être lu comme un bloc A).
+
+## Diagnostic : boîte noire et anti-collision (mode maître)
+
+- Le composant garde en RAM les **32 derniers échanges** (T = trame émise par l'ESP, R = rafale reçue, horodatage et 24 premiers octets).
+- À la première panne (10 requêtes consécutives sans réponse, ou bus muet en mode écoute), il les écrit dans le journal au niveau **ERROR** (`=== Boîte noire bus JUDO ... ===`). Une seule fois par incident ; le déclencheur est réarmé dès qu'une trame valide est reçue.
+- Anti-collision : l'ESP n'émet qu'après 50 ms de silence sur le bus, jamais pendant la réception d'une trame partielle (< 300 ms). Après une requête restée sans réponse (400 ms), il attend 150 ms de plus avant de réémettre. Les réponses 0x0043 arrivées hors délai sont ignorées.

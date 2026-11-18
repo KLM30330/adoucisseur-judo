@@ -1,4 +1,5 @@
 #include "judo_bus.h"
+#include <cstring>
 #include "esphome/core/log.h"
 #include "esphome/core/preferences.h"
 
@@ -116,9 +117,18 @@ void JudoBus::loop() {
       if (this->raw_burst_.size() < 256)
         this->raw_burst_.insert(this->raw_burst_.end(), tmp, tmp + std::min<size_t>(n, 256 - this->raw_burst_.size()));
     }
+    if (this->trace_rx_total_ == 0)
+      this->trace_rx_start_ms_ = millis();
+    for (size_t i = 0; i < n; i++) {
+      if (this->trace_rx_len_ < sizeof(this->trace_rx_))
+        this->trace_rx_[this->trace_rx_len_++] = tmp[i];
+    }
+    this->trace_rx_total_ += n;
     this->last_rx_byte_ms_ = millis();
     this->rx_bytes_ += n;
   }
+  if (this->trace_rx_total_ > 0 && millis() - this->last_rx_byte_ms_ >= 5)
+    this->trace_flush_rx_();
   // Journal brut : chaque rafale d'octets (séparée par >= 5 ms de silence), décodable ou non
   if (this->log_raw_ && !this->raw_burst_.empty() && millis() - this->last_rx_byte_ms_ >= 5) {
     ESP_LOGI(TAG, "BRUT %3u o : %s", (unsigned) this->raw_burst_.size(),
@@ -160,6 +170,8 @@ void JudoBus::loop() {
       this->bus_ok_->publish_state(ok);
     if (!ok && this->last_valid_ms_ != 0)
       this->event_("Bus RS485 muet depuis " + std::to_string(this->bus_timeout_ms_ / 60000) + " min");
+    if (!ok && this->last_valid_ms_ != 0)
+      this->trace_dump_("bus muet");
     if (!ok && !this->master_ && this->power_switch_ != nullptr &&
         (!this->power_cycled_once_ || now - this->last_power_cycle_ms_ > 300000))
       this->power_cycle_module("bus muet");
@@ -212,6 +224,8 @@ void JudoBus::handle_frame_(uint16_t cmd, const uint8_t *d, uint16_t len) {
     this->last_raw_ms_ = now;
   }
   const bool is_request = len == 0 || (cmd == CMD_STATUS && len == 1);
+  if (!is_request)
+    this->trace_dumped_ = false;  // liaison vivante : une prochaine panne sera de nouveau tracée
   if (this->master_) {
     if (is_request && millis() - this->last_tx_ms_ > 100) {
       // Requête que nous n'avons pas émise : un autre maître (module Connectivity) est présent
@@ -346,6 +360,51 @@ void JudoBus::handle_frame_(uint16_t cmd, const uint8_t *d, uint16_t len) {
   }
 }
 
+void JudoBus::trace_push_(bool tx, const uint8_t *d, size_t len, uint32_t ms) {
+  TraceEntry &e = this->trace_[this->trace_head_];
+  e.ms = ms;
+  e.tx = tx ? 1 : 0;
+  e.len = len > 255 ? 255 : (uint8_t) len;
+  const size_t n = len < sizeof(e.data) ? len : sizeof(e.data);
+  memcpy(e.data, d, n);
+  this->trace_head_ = (this->trace_head_ + 1) % TRACE_N;
+  if (this->trace_count_ < TRACE_N)
+    this->trace_count_++;
+}
+
+void JudoBus::trace_flush_rx_() {
+  // trace_rx_ ne garde que les 24 premiers octets ; la longueur réelle est conservée
+  TraceEntry &e = this->trace_[this->trace_head_];
+  e.ms = this->trace_rx_start_ms_;
+  e.tx = 0;
+  e.len = this->trace_rx_total_ > 255 ? 255 : (uint8_t) this->trace_rx_total_;
+  memcpy(e.data, this->trace_rx_, this->trace_rx_len_);
+  this->trace_head_ = (this->trace_head_ + 1) % TRACE_N;
+  if (this->trace_count_ < TRACE_N)
+    this->trace_count_++;
+  this->trace_rx_len_ = 0;
+  this->trace_rx_total_ = 0;
+}
+
+void JudoBus::trace_dump_(const char *why) {
+  if (this->trace_dumped_ || this->trace_count_ == 0)
+    return;
+  this->trace_dumped_ = true;
+  const uint32_t now = millis();
+  ESP_LOGE(TAG, "=== Boîte noire bus JUDO (%s) : %u derniers échanges ===", why, this->trace_count_);
+  uint32_t prev = 0;
+  for (uint8_t i = 0; i < this->trace_count_; i++) {
+    const uint8_t idx = (this->trace_head_ + TRACE_N - this->trace_count_ + i) % TRACE_N;
+    const TraceEntry &e = this->trace_[idx];
+    const uint8_t shown = e.len < sizeof(e.data) ? e.len : sizeof(e.data);
+    ESP_LOGE(TAG, "%c -%6u ms (+%4u) %3u o : %s%s", e.tx ? 'T' : 'R', (unsigned) (now - e.ms),
+             (unsigned) (i == 0 ? 0 : e.ms - prev), e.len, hex_(e.data, shown).c_str(),
+             e.len > shown ? " ..." : "");
+    prev = e.ms;
+  }
+  ESP_LOGE(TAG, "=== fin de la boîte noire ===");
+}
+
 void JudoBus::power_cycle_module(const char *reason) {
   if (this->power_switch_ == nullptr || this->power_cycling_)
     return;
@@ -430,6 +489,7 @@ void JudoBus::send_request_(uint16_t cmd, const uint8_t *data, uint16_t len) {
     this->write_array(f, 8 + len);
     this->flush();
   }
+  this->trace_push_(true, f, 8 + len, millis());
   this->last_tx_ms_ = millis();
   this->tx_frames_++;
   this->awaiting_ = true;
@@ -447,17 +507,28 @@ void JudoBus::master_loop_() {
     this->awaiting_ = false;
     this->last_page_ = -1;
     this->timeouts_++;
-    if (++this->consecutive_timeouts_ == 10)
+    if (++this->consecutive_timeouts_ == 10) {
       ESP_LOGW(TAG, "Aucune réponse de l'adoucisseur à 10 requêtes (câblage TX, A/B, ou session requise ?)");
+      this->trace_dump_("10 requêtes sans réponse");
+    }
+    // Après une absence de réponse, laisser au moins 150 ms de silence avant de réémettre :
+    // une réponse tardive de l'adoucisseur ne doit pas croiser notre requête suivante.
+    this->tx_hold_until_ = now + 150;
     if (this->power_switch_ != nullptr && this->consecutive_timeouts_ >= this->stuck_threshold_ &&
         (!this->power_cycled_once_ || now - this->last_power_cycle_ms_ > 300000)) {
       this->power_cycle_module("pas de réponse de l'adoucisseur");
       return;
     }
   }
-  // Bus libre depuis 30 ms et intervalle minimal entre deux requêtes
-  if (now - this->last_rx_byte_ms_ < 30 || now - this->last_tx_ms_ < this->poll_interval_ms_)
+  // Anti-collision : bus libre depuis 50 ms, aucune trame en cours de réception,
+  // délai de garde après une absence de réponse, intervalle minimal entre deux requêtes.
+  if (now - this->last_rx_byte_ms_ < 50 || now - this->last_tx_ms_ < this->poll_interval_ms_ ||
+      (int32_t) (now - this->tx_hold_until_) < 0)
     return;
+  if (!this->buf_.empty() && now - this->last_rx_byte_ms_ < 300)
+    return;  // trame partielle dans le tampon : on attend qu'elle se termine ou expire
+  if (!this->buf_.empty())
+    this->buf_.clear();  // reliquat d'une trame incomplète
 
   if (this->session_init_ && !this->session_done_) {
     // Écritures observées depuis le module Connectivity (rôle inconnu)

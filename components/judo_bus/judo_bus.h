@@ -122,6 +122,26 @@ class JudoBus : public Component, public uart::UARTDevice {
   void send_request_(uint16_t cmd, const uint8_t *data, uint16_t len);
   bool master_{false};
   bool log_raw_{false};
+  // Trace « boîte noire » : 32 derniers échanges, vidée dans le journal (ERROR) quand la liaison tombe
+  struct TraceEntry {
+    uint32_t ms;
+    uint8_t tx;    // 1 = émis par l'ESP, 0 = reçu
+    uint8_t len;   // longueur réelle (peut dépasser 24)
+    uint8_t data[24];
+  };
+  static const uint8_t TRACE_N = 32;
+  TraceEntry trace_[TRACE_N]{};
+  uint8_t trace_head_{0};
+  uint8_t trace_count_{0};
+  uint8_t trace_rx_[24]{};
+  uint8_t trace_rx_len_{0};
+  uint16_t trace_rx_total_{0};
+  uint32_t trace_rx_start_ms_{0};
+  bool trace_dumped_{false};
+  uint32_t tx_hold_until_{0};
+  void trace_push_(bool tx, const uint8_t *d, size_t len, uint32_t ms);
+  void trace_flush_rx_();
+  void trace_dump_(const char *why);
   // Alimentation du module RS485 pilotée (redémarrage automatique s'il se bloque)
   void power_loop_();
   switch_::Switch *power_switch_{nullptr};
