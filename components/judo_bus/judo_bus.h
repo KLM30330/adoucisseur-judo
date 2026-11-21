@@ -53,6 +53,8 @@ class JudoBus : public Component, public uart::UARTDevice {
   void set_power_cycle_on_boot(bool b) { this->boot_cycle_pending_ = b; }
   void set_stuck_timeouts(uint16_t n) { this->stuck_threshold_ = n; }
   void power_cycle_module(const char *reason);
+  void set_salt_alarm_delay(uint32_t ms) { this->salt_delay_ms_ = ms; }
+  void set_max_flow(uint32_t l_min) { this->max_flow_ = l_min; }
 
   void setup() override;
   void loop() override;
@@ -75,11 +77,13 @@ class JudoBus : public Component, public uart::UARTDevice {
   JUDO_SENSOR(flow_instant)
   JUDO_SENSOR(capacity_remaining)
   JUDO_SENSOR(capacity_at_regeneration)
+  JUDO_SENSOR(phantom_water)
 
   JUDO_BINARY(salt_shortage)
   JUDO_BINARY(maintenance_due)
   JUDO_BINARY(regeneration)
   JUDO_BINARY(bus_ok)
+  JUDO_BINARY(flow_anomaly)
 
   JUDO_TEXT(hardware_version)
   JUDO_TEXT(software_version)
@@ -103,6 +107,15 @@ class JudoBus : public Component, public uart::UARTDevice {
   bool regen_bit_known_{false};
   bool regen_bit_{false};
   bool regen_salt_drop_{false};
+  // Alerte sel temporisée
+  uint32_t salt_delay_ms_{120000};
+  uint32_t brine_lost_ms_{0};        // début de l'absence de saumure (0 = saumure présente)
+  uint32_t brine_dips_{0};           // décrochages brefs ignorés
+  // Contrôle de cohérence du compteur d'eau
+  uint32_t max_flow_{60};
+  uint32_t phantom_l_{0};
+  uint32_t flow_anomaly_until_{0};
+  bool flow_anomaly_on_{false};
   bool salt_latched_{false};
   bool salt_published_{false};
   ESPPreferenceObject salt_pref_;

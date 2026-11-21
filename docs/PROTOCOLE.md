@@ -204,3 +204,17 @@ attente de réponse 400 ms. Toute réponse `0x0043` arrivée hors délai est ign
 - Le composant garde en RAM les **32 derniers échanges** (T = trame émise par l'ESP, R = rafale reçue, horodatage et 24 premiers octets).
 - À la première panne (10 requêtes consécutives sans réponse, ou bus muet en mode écoute), il les écrit dans le journal au niveau **ERROR** (`=== Boîte noire bus JUDO ... ===`). Une seule fois par incident ; le déclencheur est réarmé dès qu'une trame valide est reçue.
 - Anti-collision : l'ESP n'émet qu'après 50 ms de silence sur le bus, jamais pendant la réception d'une trame partielle (< 300 ms). Après une requête restée sans réponse (400 ms), il attend 150 ms de plus avant de réémettre. Les réponses 0x0043 arrivées hors délai sont ignorées.
+
+## Électrode de saumure : décrochages normaux
+
+Bloc A, octet 0, bit 7 = électrode immergée dans la saumure. Au repos, il reste à 1 en permanence quand le bac est correctement rempli. À chaque régénération, il retombe à 0 pendant **2 à 4 secondes** pendant l'aspiration de la saumure, puis repasse à 1 : c'est normal. Un vrai manque de sel se traduit par une absence prolongée (plusieurs minutes). Le composant n'alerte donc qu'après `salt_alarm_delay` (2 min par défaut) d'absence continue, ou si la saumure manque encore à la fin d'une régénération.
+
+## Contrôle de cohérence du compteur d'eau (0x0029)
+
+Observé le 20-21/11/2026 : le compteur total (et le compteur de capacité du bloc A) a fait des sauts physiquement impossibles (+25 L en 5 s, +37 L en 10 s), alors que le débit instantané restait vers 1 L/min. L'adoucisseur, qui compte lui-même ces litres, a enchaîné 4 régénérations en 18 h. Le composant compare chaque hausse au débit maximal plausible (`max_flow`, 60 L/min par défaut, +3 L de tolérance) : l'excédent est cumulé dans « eau fantôme » et l'entité « débit incohérent » passe à ON pendant 30 min.
+
+## Bloc B : octets encore partiellement compris
+
+- [24-25] u16 : filtre interne recalculé à chaque litre, `v = v + (1360 − v) / 10`, remis à 0 une fois par jour à heure fixe (l'adoucisseur n'a pas d'horloge : jour interne compté depuis la mise sous tension).
+- [28] bit 3 : bascule uniquement quand l'eau coule, probablement l'état du contact de la turbine au moment de la lecture.
+- La commande 0x0018 [2-3] n'est pas remise à zéro chaque jour : probablement une consommation sur 7 jours internes (à confirmer).

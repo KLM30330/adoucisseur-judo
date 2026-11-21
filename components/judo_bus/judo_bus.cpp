@@ -98,9 +98,19 @@ void JudoBus::setup() {
   uint8_t v = 0;
   if (this->salt_pref_.load(&v))
     this->salt_latched_ = v != 0;
+  if (this->flow_anomaly_ != nullptr)
+    this->flow_anomaly_->publish_state(false);
+  if (this->phantom_water_ != nullptr)
+    this->phantom_water_->publish_state(0);
 }
 
 void JudoBus::loop() {
+  if (this->flow_anomaly_on_ && (int32_t) (millis() - this->flow_anomaly_until_) >= 0) {
+    this->flow_anomaly_on_ = false;
+    if (this->flow_anomaly_ != nullptr)
+      this->flow_anomaly_->publish_state(false);
+    this->event_("Débit de nouveau cohérent depuis 30 min");
+  }
   if (this->power_switch_ != nullptr)
     this->power_loop_();
   uint8_t tmp[64];
@@ -143,13 +153,13 @@ void JudoBus::loop() {
   // Diagnostic périodique (journal INFO + entité texte) toutes les 60 s
   if (now - this->last_diag_ms_ >= 60000) {
     this->last_diag_ms_ = now;
-    char s[160];
+    char s[200];
     snprintf(s, sizeof(s), "%s | RX %" PRIu32 " o | trames OK %" PRIu32 " | CRC err %" PRIu32 " | TX %" PRIu32
-             " | sans réponse %" PRIu32 " | reset module %" PRIu32,
+             " | sans réponse %" PRIu32 " | reset module %" PRIu32 " | décrochages saumure %" PRIu32,
              this->master_ ? ((int32_t) (now - this->master_paused_until_) < 0 ? "maître (suspendu)" : "maître")
                            : "écoute",
              this->rx_bytes_, this->frames_ok_, this->crc_errors_, this->tx_frames_, this->timeouts_,
-             this->power_cycles_);
+             this->power_cycles_, this->brine_dips_);
     ESP_LOGI(TAG, "Diagnostic bus : %s", s);
     if (this->bus_diagnostic_ != nullptr)
       this->bus_diagnostic_->publish_state(s);
@@ -316,6 +326,29 @@ void JudoBus::handle_frame_(uint16_t cmd, const uint8_t *d, uint16_t len) {
         const uint32_t litres = u32_(d);
         const uint32_t now = millis();
         if (this->water_known_ && litres > this->water_l_ && litres - this->water_l_ < 10000) {
+          // Contrôle de cohérence : une hausse supérieure au débit maximal plausible
+          // (max_flow_ L/min, avec 3 L de tolérance) est comptée comme « eau fantôme ».
+          const uint32_t delta = litres - this->water_l_;
+          const uint32_t dtw = now - this->water_poll_ms_;
+          const uint32_t plausible = (uint32_t) ((uint64_t) this->max_flow_ * dtw / 60000ULL) + 3;
+          if (dtw > 0 && dtw < 600000 && delta > plausible) {
+            const uint32_t excess = delta - plausible;
+            this->phantom_l_ += excess;
+            if (this->phantom_water_ != nullptr)
+              this->phantom_water_->publish_state(this->phantom_l_);
+            ESP_LOGW(TAG, "Compteur d'eau incohérent : +%u L en %u ms (%.0f L/min)", (unsigned) delta,
+                     (unsigned) dtw, delta * 60000.0f / dtw);
+            if (!this->flow_anomaly_on_) {
+              this->flow_anomaly_on_ = true;
+              if (this->flow_anomaly_ != nullptr)
+                this->flow_anomaly_->publish_state(true);
+              char buf[96];
+              snprintf(buf, sizeof(buf), "Débit incohérent : +%u L en %.0f s (turbine ?)", (unsigned) delta,
+                       dtw / 1000.0f);
+              this->event_(buf);
+            }
+            this->flow_anomaly_until_ = now + 1800000;  // l'alerte retombe après 30 min sans incohérence
+          }
           // débit moyen depuis la lecture précédente (le module interroge environ chaque minute)
           const uint32_t dt = now - this->water_poll_ms_;
           if (this->flow_rate_ != nullptr && dt > 0 && dt < 600000)
@@ -641,7 +674,8 @@ void JudoBus::handle_status_block_(const uint8_t *d, uint16_t len) {
         if (in_regen) {
           this->regen_salt_drop_ = false;
           this->event_("Régénération démarrée");
-        } else if (this->regen_salt_drop_) {
+        } else if (this->regen_salt_drop_ || (!brine_ok && this->brine_lost_ms_ != 0)) {
+          this->set_salt_latched_(true);
           this->event_("Régénération terminée : saumure insuffisante pendant l'aspiration, ajouter du sel");
         } else {
           this->event_("Régénération terminée : saumure correcte");
@@ -658,16 +692,36 @@ void JudoBus::handle_status_block_(const uint8_t *d, uint16_t len) {
       this->regeneration_remaining_->publish_state((secs + 59) / 60);
     }
 
-    // --- Électrode de saumure + alerte sel mémorisée ---
+    // --- Électrode de saumure + alerte sel mémorisée (temporisée) ---
+    // Pendant l'aspiration de la saumure, l'électrode décroche normalement 2 à 4 s :
+    // on n'alerte que si elle reste hors saumure au moins salt_delay_ms_.
+    const uint32_t now_ms = millis();
     if (!this->brine_known_ || brine_ok != this->brine_ok_) {
-      if (this->brine_known_)
-        this->event_(brine_ok ? "Électrode de saumure immergée"
-                              : (in_regen ? "Saumure non détectée pendant la régénération : manque de sel"
-                                          : "Électrode de saumure hors saumure : manque de sel"));
+      if (this->brine_known_) {
+        if (!brine_ok) {
+          this->brine_lost_ms_ = now_ms == 0 ? 1 : now_ms;
+          ESP_LOGD(TAG, "Électrode hors saumure (%s)", in_regen ? "régénération" : "repos");
+        } else if (this->brine_lost_ms_ != 0) {
+          const uint32_t lost = now_ms - this->brine_lost_ms_;
+          if (lost < this->salt_delay_ms_) {
+            this->brine_dips_++;
+            ESP_LOGI(TAG, "Décrochage bref de l'électrode de saumure (%u s), ignoré", (unsigned) (lost / 1000));
+          } else {
+            this->event_("Électrode de saumure de nouveau immergée");
+          }
+          this->brine_lost_ms_ = 0;
+        }
+      } else if (!brine_ok) {
+        this->brine_lost_ms_ = now_ms == 0 ? 1 : now_ms;
+      }
       this->brine_known_ = true;
       this->brine_ok_ = brine_ok;
     }
-    if (!brine_ok) {
+    if (!brine_ok && this->brine_lost_ms_ != 0 && now_ms - this->brine_lost_ms_ >= this->salt_delay_ms_) {
+      if (!this->salt_latched_)
+        this->event_(in_regen ? "Saumure absente pendant la régénération : manque de sel"
+                              : "Électrode de saumure hors saumure depuis plus de " +
+                                    std::to_string(this->salt_delay_ms_ / 60000) + " min : manque de sel");
       if (in_regen)
         this->regen_salt_drop_ = true;
       this->set_salt_latched_(true);

@@ -72,6 +72,8 @@ judo_bus:
   poll_interval: 300ms          # une requête toutes les 300 ms au plus
   session_init: false           # inutile : le module ne fait pas d'ouverture de session
   capacity_threshold: 3000      # compteur de capacité au déclenchement d'une régénération (à confirmer)
+  salt_alarm_delay: 2min        # électrode hors saumure au moins 2 min avant d\'alerter
+  max_flow: 60                  # L/min : au-delà, la hausse du compteur d\'eau est jugée impossible
 
   # --- Valeurs confirmées ---
   soft_water_total:
@@ -119,6 +121,10 @@ judo_bus:
     name: "Adoucisseur capacité restante"
   capacity_at_regeneration:
     name: "Adoucisseur capacité au déclenchement"
+  flow_anomaly:
+    name: "Adoucisseur débit incohérent"
+  phantom_water:
+    name: "Adoucisseur eau fantôme"
   bus_ok:
     name: "Adoucisseur liaison RS485"
   last_event:

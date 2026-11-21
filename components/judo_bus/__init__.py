@@ -41,6 +41,8 @@ CONF_POWER_SWITCH = "power_switch"
 CONF_POWER_SWITCH_CUTS = "power_switch_cuts"
 CONF_POWER_CYCLE_ON_BOOT = "power_cycle_on_boot"
 CONF_STUCK_TIMEOUTS = "stuck_timeouts"
+CONF_SALT_DELAY = "salt_alarm_delay"
+CONF_MAX_FLOW = "max_flow"
 
 DIAG = ENTITY_CATEGORY_DIAGNOSTIC
 
@@ -92,6 +94,11 @@ SENSORS = {
         icon="mdi:gauge",
     ),
     "capacity_at_regeneration": dict(accuracy_decimals=0, entity_category=DIAG, icon="mdi:gauge-full"),
+    # Litres comptés de façon physiquement impossible (rafales de la turbine)
+    "phantom_water": dict(
+        unit_of_measurement="L", accuracy_decimals=0, state_class="total_increasing",
+        icon="mdi:water-alert",
+    ),
 }
 
 BINARY_SENSORS = {
@@ -99,6 +106,7 @@ BINARY_SENSORS = {
     "maintenance_due": dict(device_class=DEVICE_CLASS_PROBLEM, icon="mdi:wrench-clock"),
     "regeneration": dict(device_class=DEVICE_CLASS_RUNNING, icon="mdi:autorenew"),
     "bus_ok": dict(device_class=DEVICE_CLASS_CONNECTIVITY, entity_category=DIAG),
+    "flow_anomaly": dict(device_class=DEVICE_CLASS_PROBLEM, icon="mdi:water-alert"),
 }
 
 TEXT_SENSORS = {
@@ -138,6 +146,11 @@ _schema = {
     cv.Optional(CONF_POWER_SWITCH_CUTS, default=True): cv.boolean,  # switch ON = module coupé
     cv.Optional(CONF_POWER_CYCLE_ON_BOOT, default=True): cv.boolean,
     cv.Optional(CONF_STUCK_TIMEOUTS, default=20): cv.int_range(min=3, max=1000),
+    # Électrode hors saumure pendant au moins ce délai avant d'alerter (les décrochages
+    # de quelques secondes pendant l'aspiration de la saumure sont normaux)
+    cv.Optional(CONF_SALT_DELAY, default="2min"): cv.positive_time_period_milliseconds,
+    # Débit au-delà duquel une hausse du compteur d'eau est jugée impossible (L/min)
+    cv.Optional(CONF_MAX_FLOW, default=60): cv.int_range(min=10, max=1000),
 }
 for _k, _kw in SENSORS.items():
     _schema[cv.Optional(_k)] = sensor.sensor_schema(**_kw)
@@ -180,6 +193,8 @@ async def to_code(config):
     cg.add(var.set_session_init(config[CONF_SESSION_INIT]))
     cg.add(var.set_capacity_threshold(config[CONF_CAPACITY_THRESHOLD]))
     cg.add(var.set_log_raw_frames(config[CONF_LOG_RAW]))
+    cg.add(var.set_salt_alarm_delay(config[CONF_SALT_DELAY]))
+    cg.add(var.set_max_flow(config[CONF_MAX_FLOW]))
     if CONF_POWER_SWITCH in config:
         ps = await cg.get_variable(config[CONF_POWER_SWITCH])
         cg.add(var.set_power_switch(ps))
