@@ -78,10 +78,9 @@ void JudoBus::setup() {
         {CMD_HARDNESS_UNIT, -1, 300 * S, 0},
         {CMD_DEVICE_NUMBER, -1, 300 * S, 0},
         {CMD_RAW_WATER, -1, 300 * S, 0},
-        {0x0055, -1, 300 * S, 0},
-        {0x0056, -1, 300 * S, 0},
-        {0x0021, -1, 300 * S, 0},
-        {0x0033, -1, 300 * S, 0},
+        // 0x0021, 0x0033, 0x0055 et 0x0056 retirées : rôle inconnu. Dans l'API JUDO, certaines
+        // actions s'envoient sans donnée (ex. 0x3C fermeture anti-fuite) : on n'envoie plus
+        // que des commandes de lecture décodées.
         {0x0018, -1, 300 * S, 0},
     };
     // Premier passage étalé après le démarrage
